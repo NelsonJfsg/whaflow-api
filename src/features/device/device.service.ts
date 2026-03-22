@@ -2,18 +2,23 @@ import { HttpService } from '@nestjs/axios';
 import { BadGatewayException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosError } from 'axios';
+import { InjectRepository } from '@nestjs/typeorm';
 import { firstValueFrom } from 'rxjs';
+import { Repository } from 'typeorm';
 import {
   DeviceBootstrapApiResponse,
   DeviceLoginApiResponse,
   DeviceLoginResponse,
 } from './interfaces/device-response.interface';
+import { DeviceRegistration } from './entities/device-registration.entity';
 
 @Injectable()
 export class DeviceService {
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    @InjectRepository(DeviceRegistration)
+    private readonly deviceRegistrationRepository: Repository<DeviceRegistration>,
   ) {}
 
   async getLoginQr(): Promise<DeviceLoginResponse> {
@@ -30,27 +35,11 @@ export class DeviceService {
       '';
 
     try {
-      const bootstrapResponse = await firstValueFrom(
-        this.httpService.post<DeviceBootstrapApiResponse>(
-          externalDevicesUrl,
-          {},
-          {
-            headers: {
-              Authorization: authToken,
-            },
-          },
-        ),
+      const registeredDevice = await this.findOrCreateDeviceRegistration(
+        externalDevicesUrl,
+        authToken,
       );
-
-      const bootstrapDeviceId = bootstrapResponse.data.results?.id ?? '';
-
-      if (!bootstrapDeviceId) {
-        throw new BadGatewayException({
-          code: 'DEVICE_BOOTSTRAP_PROVIDER_ERROR',
-          message: 'Could not get device id from external provider',
-          details: bootstrapResponse.data,
-        });
-      }
+      const bootstrapDeviceId = registeredDevice.externalDeviceId;
 
       const response = await this.requestDeviceLogin(
         externalLoginUrl,
@@ -134,5 +123,55 @@ export class DeviceService {
 
       throw postError;
     }
+  }
+
+  private async findOrCreateDeviceRegistration(
+    externalDevicesUrl: string,
+    authToken: string,
+  ): Promise<DeviceRegistration> {
+    const existingDevice = await this.deviceRegistrationRepository.findOne({
+      where: { isActive: true },
+      order: { id: 'DESC' },
+    });
+
+    if (existingDevice) {
+      return existingDevice;
+    }
+
+    const bootstrapResponse = await firstValueFrom(
+      this.httpService.post<DeviceBootstrapApiResponse>(
+        externalDevicesUrl,
+        {},
+        {
+          headers: {
+            Authorization: authToken,
+          },
+        },
+      ),
+    );
+
+    const bootstrapDevice = bootstrapResponse.data.results;
+    const bootstrapDeviceId = bootstrapDevice?.id ?? '';
+
+    if (!bootstrapDeviceId) {
+      throw new BadGatewayException({
+        code: 'DEVICE_BOOTSTRAP_PROVIDER_ERROR',
+        message: 'Could not get device id from external provider',
+        details: bootstrapResponse.data,
+      });
+    }
+
+    const newDeviceRegistration = this.deviceRegistrationRepository.create({
+      externalDeviceId: bootstrapDeviceId,
+      displayName: bootstrapDevice?.display_name ?? '',
+      jid: bootstrapDevice?.jid ?? '',
+      providerState: bootstrapDevice?.state ?? '',
+      providerCreatedAt: bootstrapDevice?.created_at
+        ? new Date(bootstrapDevice.created_at)
+        : undefined,
+      isActive: true,
+    });
+
+    return this.deviceRegistrationRepository.save(newDeviceRegistration);
   }
 }

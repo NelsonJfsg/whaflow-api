@@ -294,7 +294,7 @@ export class TasksService implements OnModuleInit {
     const externalMessageUrl =
       this.configService.get<string>('TASKS_EXTERNAL_MESSAGE_URL') ??
       'http://localhost:3000/send/message';
-    const authToken = this.configService.get<string>('TASKS_AUTH_TOKEN') ?? '';
+    const authToken = this.configService.get<string>('AUTH_TOKEN') ?? '';
 
     const results = await Promise.allSettled(
       payload.recipients.map(async (recipient) => {

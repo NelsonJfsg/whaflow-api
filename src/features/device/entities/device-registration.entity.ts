@@ -20,6 +20,9 @@ export class DeviceRegistration {
   @Column({ length: 150, nullable: true })
   jid?: string;
 
+  @Column({ length: 150, nullable: true })
+  sessionJid?: string;
+
   @Column({ length: 50, nullable: true })
   providerState?: string;
 
@@ -28,6 +31,9 @@ export class DeviceRegistration {
 
   @Column({ default: true })
   isActive: boolean;
+
+  @Column({ default: false })
+  isLoggedIn: boolean;
 
   @CreateDateColumn({ type: 'datetime' })
   createdAt: Date;

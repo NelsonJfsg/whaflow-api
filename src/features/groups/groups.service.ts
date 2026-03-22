@@ -15,7 +15,7 @@ export class GroupsService {
     const externalGroupsUrl =
       this.configService.get<string>('GROUPS_EXTERNAL_URL') ??
       'http://localhost:3000/user/my/groups';
-    const authToken = this.configService.get<string>('TASKS_AUTH_TOKEN') ?? '';
+    const authToken = this.configService.get<string>('AUTH_TOKEN') ?? '';
 
     try {
       const response = await firstValueFrom(

@@ -14,4 +14,14 @@ export class DeviceController {
   postLoginQr() {
     return this.deviceService.getLoginQr();
   }
+
+  @Get('logout')
+  getLogoutDevice() {
+    return this.deviceService.logoutDevice();
+  }
+
+  @Post('logout')
+  postLogoutDevice() {
+    return this.deviceService.logoutDevice();
+  }
 }

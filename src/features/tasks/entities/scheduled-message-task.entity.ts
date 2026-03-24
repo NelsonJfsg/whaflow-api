@@ -26,8 +26,17 @@ export class ScheduledMessageTask {
   @Column({ type: 'simple-json' })
   recipients: Array<{ name: string; phone: string }>;
 
+  @Column({ type: 'char', length: 5, nullable: true })
+  sendWindowStart?: string;
+
+  @Column({ type: 'char', length: 5, nullable: true })
+  sendWindowEnd?: string;
+
   @Column({ default: true })
   isActive: boolean;
+
+  @Column({ default: true })
+  isWindowEnabled: boolean;
 
   @Column({ type: 'datetime', nullable: true })
   deactivatedAt?: Date;

@@ -124,7 +124,7 @@ export class TasksService implements OnModuleInit {
     return {
       total: tasks.length,
       tasks: tasks.map((task) => {
-        const sendWindow = this.parseSendWindowFromJobName(task.jobName);
+        const sendWindow = this.getSendWindowFromTask(task);
 
         return {
           id: task.id,
@@ -139,6 +139,8 @@ export class TasksService implements OnModuleInit {
           runsCount: task.runsCount,
           lastError: task.lastError,
           isActive: task.isActive,
+          isWindowEnabled: task.isWindowEnabled,
+          isDispatchEnabled: task.isActive && task.isWindowEnabled,
           deactivatedAt: task.deactivatedAt,
         };
       }),
@@ -180,6 +182,7 @@ export class TasksService implements OnModuleInit {
       }
 
       task.isActive = true;
+      task.isWindowEnabled = this.isWithinSendWindow(this.getSendWindowFromTask(task), new Date());
       task.deactivatedAt = undefined;
       await this.scheduledTasksRepository.save(task);
       this.registerScheduledInterval(task);
@@ -250,18 +253,21 @@ export class TasksService implements OnModuleInit {
       message: payload.message,
       frequencyInMinutes: payload.frequency,
       recipients: payload.recipients.map((recipient) => ({ ...recipient })),
+      sendWindowStart: sendWindow?.start,
+      sendWindowEnd: sendWindow?.end,
       isActive: true,
+      isWindowEnabled: this.isWithinSendWindow(sendWindow, new Date()),
       runsCount: 0,
     });
 
     let savedTask = await this.scheduledTasksRepository.save(newTask);
-    savedTask.jobName = this.buildJobName(savedTask.id, sendWindow);
+    savedTask.jobName = `${this.scheduledPrefix}${savedTask.id}`;
     savedTask = await this.scheduledTasksRepository.save(savedTask);
 
     let firstDispatchResult;
 
     try {
-      if (this.isWithinSendWindow(sendWindow, new Date())) {
+      if (savedTask.isWindowEnabled) {
         firstDispatchResult = await this.processMessageDispatch(payload, savedTask);
       } else {
         firstDispatchResult = {
@@ -505,6 +511,7 @@ export class TasksService implements OnModuleInit {
       });
 
       const now = new Date();
+      await this.syncWindowEnabledStates(activeTasks, now);
 
       for (const task of activeTasks) {
         if (!this.shouldDispatchTaskNow(task, now)) {
@@ -519,9 +526,7 @@ export class TasksService implements OnModuleInit {
   }
 
   private shouldDispatchTaskNow(task: ScheduledMessageTask, now: Date): boolean {
-    const sendWindow = this.parseSendWindowFromJobName(task.jobName);
-
-    if (!this.isWithinSendWindow(sendWindow, now)) {
+    if (!task.isWindowEnabled) {
       return false;
     }
 
@@ -531,6 +536,34 @@ export class TasksService implements OnModuleInit {
 
     const elapsedMs = now.getTime() - new Date(task.lastRunAt).getTime();
     return elapsedMs >= task.frequencyInMinutes * 60_000;
+  }
+
+  private async syncWindowEnabledStates(tasks: ScheduledMessageTask[], now: Date) {
+    const changedTasks: ScheduledMessageTask[] = [];
+
+    for (const task of tasks) {
+      const shouldEnable = this.isWithinSendWindow(this.getSendWindowFromTask(task), now);
+
+      if (task.isWindowEnabled !== shouldEnable) {
+        task.isWindowEnabled = shouldEnable;
+        changedTasks.push(task);
+      }
+    }
+
+    if (changedTasks.length > 0) {
+      await this.scheduledTasksRepository.save(changedTasks);
+    }
+  }
+
+  private getSendWindowFromTask(task: ScheduledMessageTask): SendWindow | undefined {
+    if (task.sendWindowStart && task.sendWindowEnd) {
+      return {
+        start: task.sendWindowStart,
+        end: task.sendWindowEnd,
+      };
+    }
+
+    return this.parseSendWindowFromJobName(task.jobName);
   }
 
   private cleanupLegacyTaskIntervals() {
@@ -550,19 +583,6 @@ export class TasksService implements OnModuleInit {
     if (this.schedulerRegistry.doesExist('interval', jobName)) {
       this.schedulerRegistry.deleteInterval(jobName);
     }
-  }
-
-  private buildJobName(taskId: number, sendWindow?: SendWindow): string {
-    const baseJobName = `${this.scheduledPrefix}${taskId}`;
-
-    if (!sendWindow) {
-      return baseJobName;
-    }
-
-    const compactStart = sendWindow.start.replace(':', '');
-    const compactEnd = sendWindow.end.replace(':', '');
-
-    return `${baseJobName}__w${compactStart}-${compactEnd}`;
   }
 
   private parseSendWindowFromJobName(jobName: string): SendWindow | undefined {

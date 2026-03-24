@@ -34,7 +34,10 @@ interface SendWindow {
 export class TasksService implements OnModuleInit {
   private readonly logger = new Logger(TasksService.name);
   private readonly scheduledPrefix = 'scheduled-message-';
+  private readonly dispatcherJobName = 'scheduled-message-dispatcher';
+  private readonly dispatcherTickMs = 15_000;
   private readonly runningTaskIds = new Set<number>();
+  private isDispatchCycleRunning = false;
 
   constructor(
     private readonly httpService: HttpService,
@@ -424,14 +427,7 @@ export class TasksService implements OnModuleInit {
 
   private registerScheduledInterval(task: ScheduledMessageTask) {
     this.removeIntervalIfExists(task.jobName);
-
-    const intervalInMs = task.frequencyInMinutes * 60_000;
-
-    const interval = setInterval(() => {
-      void this.executeScheduledTask(task.id);
-    }, intervalInMs);
-
-    this.schedulerRegistry.addInterval(task.jobName, interval);
+    this.ensureDispatcherRunning();
   }
 
   private async executeScheduledTask(taskId: number) {
@@ -452,9 +448,7 @@ export class TasksService implements OnModuleInit {
         return;
       }
 
-      const sendWindow = this.parseSendWindowFromJobName(task.jobName);
-
-      if (!this.isWithinSendWindow(sendWindow, new Date())) {
+      if (!this.shouldDispatchTaskNow(task, new Date())) {
         return;
       }
 
@@ -480,12 +474,75 @@ export class TasksService implements OnModuleInit {
   }
 
   private async restoreActiveSchedules() {
-    const activeTasks = await this.scheduledTasksRepository.find({
-      where: { isActive: true },
-    });
+    this.cleanupLegacyTaskIntervals();
+    this.ensureDispatcherRunning();
+  }
 
-    for (const task of activeTasks) {
-      this.registerScheduledInterval(task);
+  private ensureDispatcherRunning() {
+    if (this.schedulerRegistry.doesExist('interval', this.dispatcherJobName)) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      void this.runDueScheduledTasks();
+    }, this.dispatcherTickMs);
+
+    this.schedulerRegistry.addInterval(this.dispatcherJobName, interval);
+    void this.runDueScheduledTasks();
+  }
+
+  private async runDueScheduledTasks() {
+    if (this.isDispatchCycleRunning) {
+      return;
+    }
+
+    this.isDispatchCycleRunning = true;
+
+    try {
+      const activeTasks = await this.scheduledTasksRepository.find({
+        where: { isActive: true },
+        order: { id: 'ASC' },
+      });
+
+      const now = new Date();
+
+      for (const task of activeTasks) {
+        if (!this.shouldDispatchTaskNow(task, now)) {
+          continue;
+        }
+
+        await this.executeScheduledTask(task.id);
+      }
+    } finally {
+      this.isDispatchCycleRunning = false;
+    }
+  }
+
+  private shouldDispatchTaskNow(task: ScheduledMessageTask, now: Date): boolean {
+    const sendWindow = this.parseSendWindowFromJobName(task.jobName);
+
+    if (!this.isWithinSendWindow(sendWindow, now)) {
+      return false;
+    }
+
+    if (!task.lastRunAt) {
+      return true;
+    }
+
+    const elapsedMs = now.getTime() - new Date(task.lastRunAt).getTime();
+    return elapsedMs >= task.frequencyInMinutes * 60_000;
+  }
+
+  private cleanupLegacyTaskIntervals() {
+    const intervals = this.schedulerRegistry.getIntervals();
+
+    for (const intervalName of intervals) {
+      if (
+        intervalName.startsWith(this.scheduledPrefix) &&
+        intervalName !== this.dispatcherJobName
+      ) {
+        this.schedulerRegistry.deleteInterval(intervalName);
+      }
     }
   }
 

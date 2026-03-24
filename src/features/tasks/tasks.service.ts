@@ -34,6 +34,7 @@ interface SendWindow {
 export class TasksService implements OnModuleInit {
   private readonly logger = new Logger(TasksService.name);
   private readonly scheduledPrefix = 'scheduled-message-';
+  private readonly runningTaskIds = new Set<number>();
 
   constructor(
     private readonly httpService: HttpService,
@@ -296,74 +297,93 @@ export class TasksService implements OnModuleInit {
       'http://localhost:3000/send/message';
     const authToken = this.configService.get<string>('AUTH_TOKEN') ?? '';
 
-    const results = await Promise.allSettled(
-      payload.recipients.map(async (recipient) => {
-        try {
-          const response = await firstValueFrom(
-            this.httpService.post(
-              externalMessageUrl,
-              {
-                phone: recipient.phone,
-                is_forwarded: payload.is_forwarded,
-                message: payload.message,
-              },
-              {
-                headers: {
-                  Authorization: authToken,
-                },
-              },
-            ),
-          );
+    const results: Array<
+      | {
+          status: 'fulfilled';
+          value: {
+            recipient: { name: string; phone: string };
+            statusCode: number;
+            response: unknown;
+          };
+        }
+      | {
+          status: 'rejected';
+          reason: Error;
+        }
+    > = [];
 
-          await this.dispatchLogsRepository.save(
-            this.dispatchLogsRepository.create({
-              scheduledTaskId: scheduledTask?.id,
-              recipientName: recipient.name,
-              recipientPhone: recipient.phone,
-              isForwarded: payload.is_forwarded,
+    for (const recipient of payload.recipients) {
+      try {
+        const response = await firstValueFrom(
+          this.httpService.post(
+            externalMessageUrl,
+            {
+              phone: recipient.phone,
+              is_forwarded: payload.is_forwarded,
               message: payload.message,
-              frequencyInMinutes: payload.frequency,
-              status: 'SUCCESS',
-              statusCode: response.status,
-              responseBody: response.data,
-            }),
-          );
+            },
+            {
+              headers: {
+                Authorization: authToken,
+              },
+            },
+          ),
+        );
 
-          return {
+        await this.dispatchLogsRepository.save(
+          this.dispatchLogsRepository.create({
+            scheduledTaskId: scheduledTask?.id,
+            recipientName: recipient.name,
+            recipientPhone: recipient.phone,
+            isForwarded: payload.is_forwarded,
+            message: payload.message,
+            frequencyInMinutes: payload.frequency,
+            status: 'SUCCESS',
+            statusCode: response.status,
+            responseBody: response.data,
+          }),
+        );
+
+        results.push({
+          status: 'fulfilled',
+          value: {
             recipient,
             statusCode: response.status,
             response: response.data,
-          };
-        } catch (error) {
-          const message =
-            error instanceof Error
-              ? error.message
-              : `Unknown error sending message to ${recipient.phone}`;
+          },
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : `Unknown error sending message to ${recipient.phone}`;
 
-          await this.dispatchLogsRepository.save(
-            this.dispatchLogsRepository.create({
-              scheduledTaskId: scheduledTask?.id,
-              recipientName: recipient.name,
-              recipientPhone: recipient.phone,
-              isForwarded: payload.is_forwarded,
-              message: payload.message,
-              frequencyInMinutes: payload.frequency,
-              status: 'FAILED',
-              error: message,
-            }),
-          );
+        await this.dispatchLogsRepository.save(
+          this.dispatchLogsRepository.create({
+            scheduledTaskId: scheduledTask?.id,
+            recipientName: recipient.name,
+            recipientPhone: recipient.phone,
+            isForwarded: payload.is_forwarded,
+            message: payload.message,
+            frequencyInMinutes: payload.frequency,
+            status: 'FAILED',
+            error: message,
+          }),
+        );
 
-          this.logger.error(
-            `Error sending message to ${recipient.name} (${recipient.phone})`,
-            error instanceof Error ? error.stack : String(error),
-          );
+        this.logger.error(
+          `Error sending message to ${recipient.name} (${recipient.phone})`,
+          error instanceof Error ? error.stack : String(error),
+        );
 
-          throw new Error(
+        results.push({
+          status: 'rejected',
+          reason: new Error(
             `Failed to send message to ${recipient.name} (${recipient.phone}): ${message}`,
-          );
-        }
-      }),
-    );
+          ),
+        });
+      }
+    }
 
     const success = results
       .filter((result) => result.status === 'fulfilled')
@@ -415,36 +435,47 @@ export class TasksService implements OnModuleInit {
   }
 
   private async executeScheduledTask(taskId: number) {
+    if (this.runningTaskIds.has(taskId)) {
+      this.logger.warn(`Skipping task ${taskId} because a previous run is still in progress`);
+      return;
+    }
+
+    this.runningTaskIds.add(taskId);
+
     const task = await this.scheduledTasksRepository.findOne({ where: { id: taskId } });
 
-    if (!task || !task.isActive) {
-      if (task) {
-        this.removeIntervalIfExists(task.jobName);
-      }
-      return;
-    }
-
-    const sendWindow = this.parseSendWindowFromJobName(task.jobName);
-
-    if (!this.isWithinSendWindow(sendWindow, new Date())) {
-      return;
-    }
-
     try {
-      await this.processMessageDispatch(
-        {
-          is_forwarded: task.isForwarded,
-          message: task.message,
-          frequency: task.frequencyInMinutes,
-          recipients: task.recipients,
-        },
-        task,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Scheduled job ${task.jobName} failed`,
-        error instanceof Error ? error.stack : String(error),
-      );
+      if (!task || !task.isActive) {
+        if (task) {
+          this.removeIntervalIfExists(task.jobName);
+        }
+        return;
+      }
+
+      const sendWindow = this.parseSendWindowFromJobName(task.jobName);
+
+      if (!this.isWithinSendWindow(sendWindow, new Date())) {
+        return;
+      }
+
+      try {
+        await this.processMessageDispatch(
+          {
+            is_forwarded: task.isForwarded,
+            message: task.message,
+            frequency: task.frequencyInMinutes,
+            recipients: task.recipients,
+          },
+          task,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Scheduled job ${task.jobName} failed`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    } finally {
+      this.runningTaskIds.delete(taskId);
     }
   }
 

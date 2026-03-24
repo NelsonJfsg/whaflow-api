@@ -19,7 +19,6 @@ export class SendMessagePayloadDto implements SendMessagePayload {
   is_forwarded: boolean;
 
   @IsString()
-  @MinLength(10)
   message: string;
 
   @IsInt()

@@ -32,6 +32,9 @@ export class ScheduledMessageTask {
   @Column({ type: 'char', length: 5, nullable: true })
   sendWindowEnd?: string;
 
+  @Column({ type: 'char', length: 5, nullable: true })
+  sendWindowStartAt?: string;
+
   @Column({ default: true })
   isActive: boolean;
 

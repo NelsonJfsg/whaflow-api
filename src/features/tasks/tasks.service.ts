@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   BadGatewayException,
   Injectable,
   Logger,
@@ -14,6 +15,7 @@ import { Repository } from 'typeorm';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { SendMessagePayloadDto } from './dto/send-message-payload.dto';
+import { UpdateScheduledMessageTaskDto } from './dto/update-scheduled-message-task.dto';
 import { Task } from './entities/task.entity';
 import { ScheduledMessageTask } from './entities/scheduled-message-task.entity';
 import { MessageDispatchLog } from './entities/message-dispatch-log.entity';
@@ -28,6 +30,7 @@ interface DispatchPayload {
 interface SendWindow {
   start: string;
   end: string;
+  start_at?: string;
 }
 
 @Injectable()
@@ -36,6 +39,7 @@ export class TasksService implements OnModuleInit {
   private readonly scheduledPrefix = 'scheduled-message-';
   private readonly dispatcherJobName = 'scheduled-message-dispatcher';
   private readonly dispatcherTickMs = 15_000;
+  private readonly dispatchVisualSafetyMs: number;
   private readonly runningTaskIds = new Set<number>();
   private isDispatchCycleRunning = false;
 
@@ -49,7 +53,9 @@ export class TasksService implements OnModuleInit {
     private readonly scheduledTasksRepository: Repository<ScheduledMessageTask>,
     @InjectRepository(MessageDispatchLog)
     private readonly dispatchLogsRepository: Repository<MessageDispatchLog>,
-  ) {}
+  ) {
+    this.dispatchVisualSafetyMs = this.resolveDispatchVisualSafetyMs();
+  }
 
   async onModuleInit() {
     await this.restoreActiveSchedules();
@@ -144,6 +150,34 @@ export class TasksService implements OnModuleInit {
           deactivatedAt: task.deactivatedAt,
         };
       }),
+    };
+  }
+
+  async getScheduledMessageById(id: number) {
+    const task = await this.scheduledTasksRepository.findOne({ where: { id } });
+
+    if (!task) {
+      throw new NotFoundException(`Scheduled task with id ${id} not found`);
+    }
+
+    const sendWindow = this.getSendWindowFromTask(task);
+
+    return {
+      id: task.id,
+      jobName: task.jobName,
+      is_forwarded: task.isForwarded,
+      message: task.message,
+      frequencyInMinutes: task.frequencyInMinutes,
+      recipients: task.recipients,
+      send_window: sendWindow,
+      createdAt: task.createdAt,
+      lastRunAt: task.lastRunAt,
+      runsCount: task.runsCount,
+      lastError: task.lastError,
+      isActive: task.isActive,
+      isWindowEnabled: task.isWindowEnabled,
+      isDispatchEnabled: task.isActive && task.isWindowEnabled,
+      deactivatedAt: task.deactivatedAt,
     };
   }
 
@@ -244,8 +278,61 @@ export class TasksService implements OnModuleInit {
     };
   }
 
+  async updateScheduledMessageTask(id: number, updates: UpdateScheduledMessageTaskDto) {
+    const task = await this.scheduledTasksRepository.findOne({ where: { id } });
+
+    if (!task) {
+      throw new NotFoundException(`Scheduled task with id ${id} not found`);
+    }
+
+    const mergedWindow = this.mergeSendWindowUpdate(this.getSendWindowFromTask(task), updates);
+    this.validateAnchoredStartTime(mergedWindow);
+
+    if (updates.is_forwarded !== undefined) {
+      task.isForwarded = updates.is_forwarded;
+    }
+
+    if (updates.message !== undefined) {
+      task.message = updates.message;
+    }
+
+    if (updates.frequency !== undefined) {
+      task.frequencyInMinutes = updates.frequency;
+    }
+
+    if (updates.recipients !== undefined) {
+      task.recipients = updates.recipients.map((recipient) => ({ ...recipient }));
+    }
+
+    if (mergedWindow) {
+      task.sendWindowStart = mergedWindow.start;
+      task.sendWindowEnd = mergedWindow.end;
+      task.sendWindowStartAt = mergedWindow.start_at;
+    }
+
+    const now = new Date();
+    task.isWindowEnabled = this.isWithinSendWindow(this.getSendWindowFromTask(task), now);
+
+    const updatedTask = await this.scheduledTasksRepository.save(task);
+    this.registerScheduledInterval(updatedTask);
+
+    return {
+      message: 'Scheduled message task updated',
+      id: updatedTask.id,
+      jobName: updatedTask.jobName,
+      is_forwarded: updatedTask.isForwarded,
+      frequencyInMinutes: updatedTask.frequencyInMinutes,
+      send_window: this.getSendWindowFromTask(updatedTask),
+      recipients: updatedTask.recipients,
+      isActive: updatedTask.isActive,
+      isWindowEnabled: updatedTask.isWindowEnabled,
+    };
+  }
+
   private async createAndScheduleMessageTask(payload: SendMessagePayloadDto) {
     const sendWindow = payload.send_window;
+    this.validateAnchoredStartTime(sendWindow);
+    const now = new Date();
 
     const newTask = this.scheduledTasksRepository.create({
       jobName: `${this.scheduledPrefix}pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -255,8 +342,9 @@ export class TasksService implements OnModuleInit {
       recipients: payload.recipients.map((recipient) => ({ ...recipient })),
       sendWindowStart: sendWindow?.start,
       sendWindowEnd: sendWindow?.end,
+      sendWindowStartAt: sendWindow?.start_at,
       isActive: true,
-      isWindowEnabled: this.isWithinSendWindow(sendWindow, new Date()),
+      isWindowEnabled: this.isWithinSendWindow(sendWindow, now),
       runsCount: 0,
     });
 
@@ -267,12 +355,19 @@ export class TasksService implements OnModuleInit {
     let firstDispatchResult;
 
     try {
-      if (savedTask.isWindowEnabled) {
+      if (this.shouldDispatchTaskNow(savedTask, now)) {
         firstDispatchResult = await this.processMessageDispatch(payload, savedTask);
       } else {
+        const hasAnchoredStart = Boolean(sendWindow?.start_at);
+
         firstDispatchResult = {
           skipped: true,
-          reason: 'Current time is outside send_window',
+          reason:
+            !savedTask.isWindowEnabled
+              ? 'Current time is outside send_window'
+              : hasAnchoredStart
+                ? 'Current time does not match send_window.start_at frequency slot yet'
+                : 'Scheduled task is waiting for the next frequency slot',
           send_window: sendWindow,
         };
       }
@@ -530,6 +625,12 @@ export class TasksService implements OnModuleInit {
       return false;
     }
 
+    const sendWindow = this.getSendWindowFromTask(task);
+
+    if (sendWindow?.start_at) {
+      return this.shouldDispatchAnchoredTaskNow(task, now, sendWindow);
+    }
+
     if (!task.lastRunAt) {
       return true;
     }
@@ -560,6 +661,7 @@ export class TasksService implements OnModuleInit {
       return {
         start: task.sendWindowStart,
         end: task.sendWindowEnd,
+        start_at: task.sendWindowStartAt,
       };
     }
 
@@ -598,6 +700,196 @@ export class TasksService implements OnModuleInit {
       start: `${startRaw.slice(0, 2)}:${startRaw.slice(2)}`,
       end: `${endRaw.slice(0, 2)}:${endRaw.slice(2)}`,
     };
+  }
+
+  private shouldDispatchAnchoredTaskNow(
+    task: ScheduledMessageTask,
+    now: Date,
+    sendWindow: SendWindow,
+  ): boolean {
+    const anchorTime = sendWindow.start_at;
+
+    if (!anchorTime || task.frequencyInMinutes <= 0) {
+      return false;
+    }
+
+    const bounds = this.getCurrentWindowBounds(sendWindow, now);
+
+    if (!bounds) {
+      return false;
+    }
+
+    const anchorDate = this.buildAnchorDate(bounds.start, bounds.end, anchorTime);
+
+    if (!anchorDate || now.getTime() < anchorDate.getTime()) {
+      return false;
+    }
+
+    const frequencyMs = task.frequencyInMinutes * 60_000;
+    const elapsedMs = now.getTime() - anchorDate.getTime();
+    const toleranceMs = Math.min(this.dispatcherTickMs * 2, frequencyMs);
+    const remainderMs = elapsedMs % frequencyMs;
+
+    if (remainderMs > toleranceMs) {
+      return false;
+    }
+
+    const slotStart = new Date(now.getTime() - remainderMs);
+
+    // Avoid boundary-second drift where downstream clients can render the previous minute.
+    if (now.getTime() < slotStart.getTime() + this.dispatchVisualSafetyMs) {
+      return false;
+    }
+
+    if (slotStart.getTime() > bounds.end.getTime()) {
+      return false;
+    }
+
+    if (!task.lastRunAt) {
+      return true;
+    }
+
+    return new Date(task.lastRunAt).getTime() < slotStart.getTime();
+  }
+
+  private getCurrentWindowBounds(
+    sendWindow: SendWindow,
+    now: Date,
+  ): { start: Date; end: Date } | undefined {
+    const startMinutes = this.timeToMinutes(sendWindow.start);
+    const endMinutes = this.timeToMinutes(sendWindow.end);
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+    if (startMinutes === endMinutes) {
+      const start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+
+      const end = new Date(now);
+      end.setHours(23, 59, 59, 999);
+
+      return { start, end };
+    }
+
+    if (startMinutes < endMinutes) {
+      const start = this.dateWithMinutes(now, startMinutes);
+      const end = this.dateWithMinutes(now, endMinutes);
+      return { start, end };
+    }
+
+    if (currentMinutes >= startMinutes) {
+      const start = this.dateWithMinutes(now, startMinutes);
+      const end = this.dateWithMinutes(this.addDays(now, 1), endMinutes);
+      return { start, end };
+    }
+
+    if (currentMinutes <= endMinutes) {
+      const start = this.dateWithMinutes(this.addDays(now, -1), startMinutes);
+      const end = this.dateWithMinutes(now, endMinutes);
+      return { start, end };
+    }
+
+    return undefined;
+  }
+
+  private buildAnchorDate(windowStart: Date, windowEnd: Date, anchorTime: string): Date | undefined {
+    const anchorDate = this.dateWithMinutes(windowStart, this.timeToMinutes(anchorTime));
+
+    if (anchorDate.getTime() < windowStart.getTime()) {
+      anchorDate.setDate(anchorDate.getDate() + 1);
+    }
+
+    if (anchorDate.getTime() > windowEnd.getTime()) {
+      return undefined;
+    }
+
+    return anchorDate;
+  }
+
+  private validateAnchoredStartTime(sendWindow?: SendWindow) {
+    if (!sendWindow?.start_at) {
+      return;
+    }
+
+    const isInside = this.isTimeWithinWindow(sendWindow.start_at, sendWindow.start, sendWindow.end);
+
+    if (!isInside) {
+      throw new BadRequestException(
+        'send_window.start_at must be within the send_window start/end range',
+      );
+    }
+  }
+
+  private mergeSendWindowUpdate(
+    currentWindow: SendWindow | undefined,
+    updates: UpdateScheduledMessageTaskDto,
+  ): SendWindow | undefined {
+    if (!updates.send_window) {
+      return currentWindow;
+    }
+
+    const mergedStart = updates.send_window.start ?? currentWindow?.start;
+    const mergedEnd = updates.send_window.end ?? currentWindow?.end;
+
+    if (!mergedStart || !mergedEnd) {
+      throw new BadRequestException(
+        'send_window updates require both start and end values when no existing send_window is set',
+      );
+    }
+
+    return {
+      start: mergedStart,
+      end: mergedEnd,
+      start_at: updates.send_window.start_at ?? currentWindow?.start_at,
+    };
+  }
+
+  private isTimeWithinWindow(time: string, start: string, end: string): boolean {
+    const targetMinutes = this.timeToMinutes(time);
+    const startMinutes = this.timeToMinutes(start);
+    const endMinutes = this.timeToMinutes(end);
+
+    if (startMinutes === endMinutes) {
+      return true;
+    }
+
+    if (startMinutes < endMinutes) {
+      return targetMinutes >= startMinutes && targetMinutes <= endMinutes;
+    }
+
+    return targetMinutes >= startMinutes || targetMinutes <= endMinutes;
+  }
+
+  private dateWithMinutes(base: Date, totalMinutes: number): Date {
+    const date = new Date(base);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    date.setHours(hours, minutes, 0, 0);
+    return date;
+  }
+
+  private addDays(base: Date, days: number): Date {
+    const date = new Date(base);
+    date.setDate(date.getDate() + days);
+    return date;
+  }
+
+  private resolveDispatchVisualSafetyMs(): number {
+    const rawValue = this.configService.get<string>('DISPATCH_VISUAL_SAFETY_MS');
+
+    if (!rawValue) {
+      return 10_000;
+    }
+
+    const parsedValue = Number(rawValue);
+
+    if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+      this.logger.warn(
+        `Invalid DISPATCH_VISUAL_SAFETY_MS value: ${rawValue}. Falling back to 10000ms.`,
+      );
+      return 10_000;
+    }
+
+    return Math.floor(parsedValue);
   }
 
   private isWithinSendWindow(sendWindow: SendWindow | undefined, date: Date): boolean {

@@ -13,6 +13,7 @@ import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { SendMessagePayloadDto } from './dto/send-message-payload.dto';
 import { UpdateScheduledTaskActionDto } from './dto/update-scheduled-task-action.dto';
+import { UpdateScheduledMessageTaskDto } from './dto/update-scheduled-message-task.dto';
 import { TasksService } from './tasks.service';
 
 @Controller('tasks')
@@ -38,6 +39,11 @@ export class TasksController {
   getMessageHistory(@Query('limit') limit?: string) {
     const parsedLimit = Number(limit ?? 100);
     return this.tasksService.getMessageHistory(parsedLimit);
+  }
+
+  @Get('scheduled/:id')
+  getScheduledMessageById(@Param('id', ParseIntPipe) id: number) : any {
+    return this.tasksService.getScheduledMessageById(id);
   }
 
   @Get(':id')
@@ -79,5 +85,13 @@ export class TasksController {
     @Body() body: UpdateScheduledTaskActionDto,
   ) {
     return this.tasksService.updateScheduledTaskAction(id, body.action);
+  }
+
+  @Patch('scheduled/:id')
+  updateScheduledMessageTask(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: UpdateScheduledMessageTaskDto,
+  ) : any {
+    return this.tasksService.updateScheduledMessageTask(id, body);
   }
 }

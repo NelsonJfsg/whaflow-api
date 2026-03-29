@@ -11,6 +11,9 @@ export class ScheduledMessageTask {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Column({ length: 120 })
+  ownerUserId: string;
+
   @Column({ length: 120, unique: true })
   jobName: string;
 

@@ -19,8 +19,10 @@ import { UpdateScheduledMessageTaskDto } from './dto/update-scheduled-message-ta
 import { Task } from './entities/task.entity';
 import { ScheduledMessageTask } from './entities/scheduled-message-task.entity';
 import { MessageDispatchLog } from './entities/message-dispatch-log.entity';
+import { DeviceRegistration } from '../device/entities/device-registration.entity';
 
 interface DispatchPayload {
+  ownerUserId: string;
   is_forwarded: boolean;
   message: string;
   frequency: number;
@@ -53,6 +55,8 @@ export class TasksService implements OnModuleInit {
     private readonly scheduledTasksRepository: Repository<ScheduledMessageTask>,
     @InjectRepository(MessageDispatchLog)
     private readonly dispatchLogsRepository: Repository<MessageDispatchLog>,
+    @InjectRepository(DeviceRegistration)
+    private readonly deviceRegistrationRepository: Repository<DeviceRegistration>,
   ) {
     this.dispatchVisualSafetyMs = this.resolveDispatchVisualSafetyMs();
   }
@@ -61,19 +65,23 @@ export class TasksService implements OnModuleInit {
     await this.restoreActiveSchedules();
   }
 
-  async create(createTaskDto: CreateTaskDto): Promise<Task> {
-    const task = this.tasksRepository.create(createTaskDto);
+  async create(userId: string, createTaskDto: CreateTaskDto): Promise<Task> {
+    const task = this.tasksRepository.create({
+      ...createTaskDto,
+      ownerUserId: userId,
+    });
     return this.tasksRepository.save(task);
   }
 
-  findAll(): Promise<Task[]> {
+  findAll(userId: string): Promise<Task[]> {
     return this.tasksRepository.find({
+      where: { ownerUserId: userId },
       order: { id: 'DESC' },
     });
   }
 
-  async findOne(id: number): Promise<Task> {
-    const task = await this.tasksRepository.findOne({ where: { id } });
+  async findOne(userId: string, id: number): Promise<Task> {
+    const task = await this.tasksRepository.findOne({ where: { id, ownerUserId: userId } });
 
     if (!task) {
       throw new NotFoundException(`Task with id ${id} not found`);
@@ -82,14 +90,14 @@ export class TasksService implements OnModuleInit {
     return task;
   }
 
-  async update(id: number, updateTaskDto: UpdateTaskDto): Promise<Task> {
-    const task = await this.findOne(id);
+  async update(userId: string, id: number, updateTaskDto: UpdateTaskDto): Promise<Task> {
+    const task = await this.findOne(userId, id);
     this.tasksRepository.merge(task, updateTaskDto);
     return this.tasksRepository.save(task);
   }
 
-  async remove(id: number): Promise<{ id: number; deleted: boolean }> {
-    const task = await this.findOne(id);
+  async remove(userId: string, id: number): Promise<{ id: number; deleted: boolean }> {
+    const task = await this.findOne(userId, id);
     await this.tasksRepository.remove(task);
 
     return {
@@ -98,20 +106,24 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async sendMessage(payload: SendMessagePayloadDto) {
+  async sendMessage(userId: string, payload: SendMessagePayloadDto) {
     if (payload.frequency === 0) {
-      return this.processMessageDispatch(payload);
+      return this.processMessageDispatch({
+        ownerUserId: userId,
+        ...payload,
+      });
     }
 
-    return this.createAndScheduleMessageTask(payload);
+    return this.createAndScheduleMessageTask(userId, payload);
   }
 
-  async getMessageHistory(limit = 100) {
+  async getMessageHistory(userId: string, limit = 100) {
     const take = Number.isFinite(limit)
       ? Math.max(1, Math.min(500, Math.trunc(limit)))
       : 100;
 
     const logs = await this.dispatchLogsRepository.find({
+      where: { ownerUserId: userId },
       order: { id: 'DESC' },
       take,
     });
@@ -122,8 +134,9 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async getScheduledMessages() {
+  async getScheduledMessages(userId: string) {
     const tasks = await this.scheduledTasksRepository.find({
+      where: { ownerUserId: userId },
       order: { createdAt: 'DESC' },
     });
 
@@ -153,8 +166,10 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async getScheduledMessageById(id: number) {
-    const task = await this.scheduledTasksRepository.findOne({ where: { id } });
+  async getScheduledMessageById(userId: string, id: number) {
+    const task = await this.scheduledTasksRepository.findOne({
+      where: { id, ownerUserId: userId },
+    });
 
     if (!task) {
       throw new NotFoundException(`Scheduled task with id ${id} not found`);
@@ -181,23 +196,26 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async cancelScheduledMessage(jobName: string) {
+  async cancelScheduledMessage(userId: string, jobName: string) {
     const task = await this.scheduledTasksRepository.findOne({
-      where: { jobName },
+      where: { jobName, ownerUserId: userId },
     });
 
     if (!task) {
       throw new NotFoundException(`Scheduled task with jobName ${jobName} not found`);
     }
 
-    return this.updateScheduledTaskAction(task.id, 'deactivate');
+    return this.updateScheduledTaskAction(userId, task.id, 'deactivate');
   }
 
   async updateScheduledTaskAction(
+    userId: string,
     id: number,
     action: 'activate' | 'deactivate' | 'delete',
   ) {
-    const task = await this.scheduledTasksRepository.findOne({ where: { id } });
+    const task = await this.scheduledTasksRepository.findOne({
+      where: { id, ownerUserId: userId },
+    });
 
     if (!task) {
       throw new NotFoundException(`Scheduled task with id ${id} not found`);
@@ -263,8 +281,10 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async clearAllScheduledMessages() {
-    const tasks = await this.scheduledTasksRepository.find();
+  async clearAllScheduledMessages(userId: string) {
+    const tasks = await this.scheduledTasksRepository.find({
+      where: { ownerUserId: userId },
+    });
 
     for (const task of tasks) {
       this.removeIntervalIfExists(task.jobName);
@@ -278,8 +298,14 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  async updateScheduledMessageTask(id: number, updates: UpdateScheduledMessageTaskDto) {
-    const task = await this.scheduledTasksRepository.findOne({ where: { id } });
+  async updateScheduledMessageTask(
+    userId: string,
+    id: number,
+    updates: UpdateScheduledMessageTaskDto,
+  ) {
+    const task = await this.scheduledTasksRepository.findOne({
+      where: { id, ownerUserId: userId },
+    });
 
     if (!task) {
       throw new NotFoundException(`Scheduled task with id ${id} not found`);
@@ -329,12 +355,13 @@ export class TasksService implements OnModuleInit {
     };
   }
 
-  private async createAndScheduleMessageTask(payload: SendMessagePayloadDto) {
+  private async createAndScheduleMessageTask(userId: string, payload: SendMessagePayloadDto) {
     const sendWindow = payload.send_window;
     this.validateAnchoredStartTime(sendWindow);
     const now = new Date();
 
     const newTask = this.scheduledTasksRepository.create({
+      ownerUserId: userId,
       jobName: `${this.scheduledPrefix}pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       isForwarded: payload.is_forwarded,
       message: payload.message,
@@ -356,7 +383,13 @@ export class TasksService implements OnModuleInit {
 
     try {
       if (this.shouldDispatchTaskNow(savedTask, now)) {
-        firstDispatchResult = await this.processMessageDispatch(payload, savedTask);
+        firstDispatchResult = await this.processMessageDispatch(
+          {
+            ownerUserId: userId,
+            ...payload,
+          },
+          savedTask,
+        );
       } else {
         const hasAnchoredStart = Boolean(sendWindow?.start_at);
 
@@ -400,6 +433,7 @@ export class TasksService implements OnModuleInit {
       this.configService.get<string>('TASKS_EXTERNAL_MESSAGE_URL') ??
       'http://localhost:3000/send/message';
     const authToken = this.configService.get<string>('AUTH_TOKEN') ?? '';
+    const deviceId = await this.getActiveDeviceIdForUser(payload.ownerUserId);
 
     const results: Array<
       | {
@@ -429,6 +463,7 @@ export class TasksService implements OnModuleInit {
             {
               headers: {
                 Authorization: authToken,
+                ...(deviceId ? { 'X-Device-Id': deviceId } : {}),
               },
             },
           ),
@@ -436,6 +471,7 @@ export class TasksService implements OnModuleInit {
 
         await this.dispatchLogsRepository.save(
           this.dispatchLogsRepository.create({
+            ownerUserId: payload.ownerUserId,
             scheduledTaskId: scheduledTask?.id,
             recipientName: recipient.name,
             recipientPhone: recipient.phone,
@@ -464,6 +500,7 @@ export class TasksService implements OnModuleInit {
 
         await this.dispatchLogsRepository.save(
           this.dispatchLogsRepository.create({
+            ownerUserId: payload.ownerUserId,
             scheduledTaskId: scheduledTask?.id,
             recipientName: recipient.name,
             recipientPhone: recipient.phone,
@@ -556,6 +593,7 @@ export class TasksService implements OnModuleInit {
       try {
         await this.processMessageDispatch(
           {
+            ownerUserId: task.ownerUserId,
             is_forwarded: task.isForwarded,
             message: task.message,
             frequency: task.frequencyInMinutes,
@@ -890,6 +928,15 @@ export class TasksService implements OnModuleInit {
     }
 
     return Math.floor(parsedValue);
+  }
+
+  private async getActiveDeviceIdForUser(userId: string): Promise<string | undefined> {
+    const registration = await this.deviceRegistrationRepository.findOne({
+      where: { ownerUserId: userId, isActive: true },
+      order: { id: 'DESC' },
+    });
+
+    return registration?.externalDeviceId;
   }
 
   private isWithinSendWindow(sendWindow: SendWindow | undefined, date: Date): boolean {

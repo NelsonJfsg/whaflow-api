@@ -11,7 +11,10 @@ export class DeviceRegistration {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column({ length: 120, unique: true })
+  @Column({ length: 120 })
+  ownerUserId: string;
+
+  @Column({ length: 120 })
   externalDeviceId: string;
 
   @Column({ length: 150, nullable: true })

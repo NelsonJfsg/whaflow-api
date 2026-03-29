@@ -1,6 +1,16 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
 
+const isTsRuntime = Boolean(process.env.TS_NODE) || Boolean(process.env.TS_NODE_PROJECT);
+
+const entities = isTsRuntime
+  ? ['src/**/*.entity.ts']
+  : ['dist/**/*.entity.js'];
+
+const migrations = isTsRuntime
+  ? ['src/core/database/migrations/*.ts']
+  : ['dist/core/database/migrations/*.js'];
+
 export default new DataSource({
   type: 'mysql',
   host: process.env.DB_HOST ?? 'localhost',
@@ -8,8 +18,8 @@ export default new DataSource({
   username: process.env.DB_USERNAME ?? 'root',
   password: process.env.DB_PASSWORD ?? '',
   database: process.env.DB_DATABASE ?? 'whaflow',
-  entities: ['src/**/*.entity.ts', 'dist/**/*.entity.js'],
-  migrations: ['src/core/database/migrations/*.ts', 'dist/core/database/migrations/*.js'],
+  entities,
+  migrations,
   synchronize: false,
   logging: false,
 });

@@ -25,6 +25,68 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Database migrations workflow
+
+This project is configured to use TypeORM migrations with `DB_SYNCHRONIZE=false`.
+
+### Important scripts
+
+```bash
+# TypeORM CLI (uses src/core/database/typeorm.datasource.ts)
+npm run typeorm -- <typeorm-command>
+
+# Show pending/applied migrations
+npm run migration:show
+
+# Apply pending migrations
+npm run migration:run
+
+# Revert last migration
+npm run migration:revert
+```
+
+### Generate a new migration
+
+```bash
+npm run typeorm -- migration:generate src/core/database/migrations/<MigrationName>
+```
+
+Example:
+
+```bash
+npm run typeorm -- migration:generate src/core/database/migrations/InitMultiTenant
+```
+
+### Create an empty migration file
+
+```bash
+npm run typeorm -- migration:create src/core/database/migrations/<MigrationName>
+```
+
+You can also use the shortcut scripts:
+
+```bash
+npm run migration:generate -- InitMultiTenant
+npm run migration:create -- ManualFix
+```
+
+### First-time setup after cleaning local/prod DB
+
+1. Ensure `.env` (or server env vars) has `DB_SYNCHRONIZE=false`.
+2. Confirm DB credentials point to the target database.
+3. Generate baseline migration from current entities.
+4. Review generated SQL in `src/core/database/migrations`.
+5. Apply migrations with `npm run migration:run`.
+
+### Production rollout
+
+1. Deploy code first (with `DB_SYNCHRONIZE=false`).
+2. Run `npm ci` on server.
+3. Run `npm run migration:run`.
+4. Start/restart API.
+
+Never enable `synchronize` in production.
+
 ## Project setup
 
 ```bash

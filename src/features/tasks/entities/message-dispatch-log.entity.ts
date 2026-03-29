@@ -15,6 +15,9 @@ export class MessageDispatchLog {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Column({ length: 120 })
+  ownerUserId: string;
+
   @Column({ type: 'int', nullable: true })
   scheduledTaskId?: number;
 

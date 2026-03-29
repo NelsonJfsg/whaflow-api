@@ -1,27 +1,28 @@
 import { Controller, Get, Post } from '@nestjs/common';
 import { DeviceService } from './device.service';
+import { CurrentUserId } from '../../shared/decorators/current-user-id.decorator';
 
 @Controller('device')
 export class DeviceController {
   constructor(private readonly deviceService: DeviceService) {}
 
   @Get('login')
-  getLoginQr() {
-    return this.deviceService.getLoginQr();
+  getLoginQr(@CurrentUserId() userId: string) {
+    return this.deviceService.getLoginQr(userId);
   }
 
   @Post('login')
-  postLoginQr() {
-    return this.deviceService.getLoginQr();
+  postLoginQr(@CurrentUserId() userId: string) {
+    return this.deviceService.getLoginQr(userId);
   }
 
   @Get('logout')
-  getLogoutDevice() {
-    return this.deviceService.logoutDevice();
+  getLogoutDevice(@CurrentUserId() userId: string) {
+    return this.deviceService.logoutDevice(userId);
   }
 
   @Post('logout')
-  postLogoutDevice() {
-    return this.deviceService.logoutDevice();
+  postLogoutDevice(@CurrentUserId() userId: string) {
+    return this.deviceService.logoutDevice(userId);
   }
 }

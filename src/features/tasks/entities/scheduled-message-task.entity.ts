@@ -11,6 +11,9 @@ export class ScheduledMessageTask {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Column({ length: 120 })
+  ownerUserId: string;
+
   @Column({ length: 120, unique: true })
   jobName: string;
 
@@ -31,6 +34,9 @@ export class ScheduledMessageTask {
 
   @Column({ type: 'char', length: 5, nullable: true })
   sendWindowEnd?: string;
+
+  @Column({ type: 'char', length: 5, nullable: true })
+  sendWindowStartAt?: string;
 
   @Column({ default: true })
   isActive: boolean;

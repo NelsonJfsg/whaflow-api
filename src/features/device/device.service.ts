@@ -25,7 +25,7 @@ export class DeviceService {
     private readonly deviceRegistrationRepository: Repository<DeviceRegistration>,
   ) {}
 
-  async getLoginQr(): Promise<DeviceLoginResponse> {
+  async getLoginQr(userId: string): Promise<DeviceLoginResponse> {
     const externalDevicesUrl =
       this.configService.get<string>('DEVICE_EXTERNAL_URL') ??
       'http://localhost:3000/devices';
@@ -35,44 +35,38 @@ export class DeviceService {
     const authToken = this.resolveAuthToken();
 
     try {
-      const providerDevices = await this.getProviderDevices(externalDevicesUrl, authToken);
-
-      const loggedInProviderDevice = providerDevices.find(
-        (device) => (device.state ?? '').toLowerCase() === 'logged_in',
+      const registeredDevice = await this.findOrCreateDeviceRegistration(
+        userId,
+        externalDevicesUrl,
+        authToken,
       );
 
-      if (loggedInProviderDevice) {
-        const loggedInRegistration = await this.upsertDeviceRegistration(loggedInProviderDevice);
+      const providerDevices = await this.getProviderDevices(externalDevicesUrl, authToken);
+      const providerRegisteredDevice = providerDevices.find(
+        (device) => device.id === registeredDevice.externalDeviceId,
+      );
 
-        loggedInRegistration.isLoggedIn = true;
-        loggedInRegistration.providerState = loggedInProviderDevice.state ?? 'logged_in';
-        loggedInRegistration.sessionJid = loggedInProviderDevice.jid ?? '';
-        await this.deviceRegistrationRepository.save(loggedInRegistration);
+      if ((providerRegisteredDevice?.state ?? '').toLowerCase() === 'logged_in') {
+        registeredDevice.isLoggedIn = true;
+        registeredDevice.providerState = providerRegisteredDevice?.state ?? 'logged_in';
+        registeredDevice.sessionJid = providerRegisteredDevice?.jid ?? '';
+        await this.deviceRegistrationRepository.save(registeredDevice);
 
         return {
           code: 'SUCCESS',
           message: 'Device is ready to use',
           results: {
-            device_id: loggedInRegistration.externalDeviceId,
+            device_id: registeredDevice.externalDeviceId,
             qr_duration: 0,
             qr_link: '',
             is_ready: true,
             session: {
-              state: loggedInRegistration.providerState ?? 'logged_in',
-              jid: loggedInRegistration.sessionJid,
+              state: registeredDevice.providerState ?? 'logged_in',
+              jid: registeredDevice.sessionJid,
             },
           },
         };
       }
-
-      const providerCandidateDevice =
-        providerDevices.find((device) => Boolean(device.id)) ?? undefined;
-
-      const registeredDevice = await this.findOrCreateDeviceRegistration(
-        externalDevicesUrl,
-        authToken,
-        providerCandidateDevice,
-      );
 
       if (registeredDevice.isLoggedIn) {
         return {
@@ -162,14 +156,14 @@ export class DeviceService {
     }
   }
 
-  async logoutDevice(): Promise<DeviceLogoutResponse> {
+  async logoutDevice(userId: string): Promise<DeviceLogoutResponse> {
     const externalLogoutUrl =
       this.configService.get<string>('DEVICE_LOGOUT_EXTERNAL_URL') ??
       'http://localhost:3000/app/logout';
     const authToken = this.resolveAuthToken();
 
     const registeredDevice = await this.deviceRegistrationRepository.findOne({
-      where: { isActive: true },
+      where: { ownerUserId: userId, isActive: true },
       order: { id: 'DESC' },
     });
 
@@ -315,21 +309,17 @@ export class DeviceService {
   }
 
   private async findOrCreateDeviceRegistration(
+    userId: string,
     externalDevicesUrl: string,
     authToken: string,
-    providerCandidateDevice?: DeviceProviderDevice,
   ): Promise<DeviceRegistration> {
     const existingDevice = await this.deviceRegistrationRepository.findOne({
-      where: { isActive: true },
+      where: { ownerUserId: userId, isActive: true },
       order: { id: 'DESC' },
     });
 
     if (existingDevice) {
       return existingDevice;
-    }
-
-    if (providerCandidateDevice?.id) {
-      return this.upsertDeviceRegistration(providerCandidateDevice);
     }
 
     const bootstrapResponse = await firstValueFrom(
@@ -356,6 +346,7 @@ export class DeviceService {
     }
 
     const newDeviceRegistration = this.deviceRegistrationRepository.create({
+      ownerUserId: userId,
       externalDeviceId: bootstrapDeviceId,
       displayName: bootstrapDevice?.display_name ?? '',
       jid: bootstrapDevice?.jid ?? '',
@@ -387,10 +378,11 @@ export class DeviceService {
   }
 
   private async upsertDeviceRegistration(
+    userId: string,
     providerDevice: DeviceProviderDevice,
   ): Promise<DeviceRegistration> {
     const existing = await this.deviceRegistrationRepository.findOne({
-      where: { externalDeviceId: providerDevice.id },
+      where: { ownerUserId: userId, externalDeviceId: providerDevice.id },
     });
 
     if (existing) {
@@ -405,6 +397,7 @@ export class DeviceService {
     }
 
     const newRegistration = this.deviceRegistrationRepository.create({
+      ownerUserId: userId,
       externalDeviceId: providerDevice.id,
       providerState: providerDevice.state ?? '',
       jid: providerDevice.jid ?? '',

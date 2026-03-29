@@ -6,5 +6,6 @@ export interface SendMessagePayload {
   send_window?: {
     start: string;
     end: string;
+    start_at?: string;
   };
 }

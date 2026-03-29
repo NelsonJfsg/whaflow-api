@@ -12,6 +12,9 @@ export class Task {
   id: number;
 
   @Column({ length: 120 })
+  ownerUserId: string;
+
+  @Column({ length: 120 })
   title: string;
 
   @Column({ type: 'text', nullable: true })
